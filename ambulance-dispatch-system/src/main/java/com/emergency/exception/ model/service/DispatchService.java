@@ -1,38 +1,85 @@
 package com.emergency.service;
 
-import com.emergency.exception.InvalidRequestException;
+import com.emergency.exception.*;
 import com.emergency.model.*;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+import java.util.*;
 
-public class DispatchServiceTest {
-    private DispatchService dispatchService;
+public class DispatchService {
+    private final List<Ambulance> ambulances = new ArrayList<>();
+    private final PriorityQueue<EmergencyRequest> waitingQueue = new PriorityQueue<>();
+    private final List<String> historyLog = new ArrayList<>();
 
-    @BeforeEach
-    public void setup() {
-        dispatchService = new DispatchService();
+    public void registerAmbulance(Ambulance ambulance) {
+        ambulances.add(ambulance);
     }
 
-    @Test
-    public void testPriorityQueueAndAllocation() {
-        Ambulance amb1 = new Ambulance("AMB01", AmbulanceType.ICU, "Driver A", 12.9716, 77.5946);
-        dispatchService.registerAmbulance(amb1);
-
-        EmergencyRequest lowPriorityReq = new EmergencyRequest("REQ01", "P101", EmergencyPriority.NORMAL, AmbulanceType.ICU, 12.9800, 77.6000, "City Hospital");
-        EmergencyRequest highPriorityReq = new EmergencyRequest("REQ02", "P102", EmergencyPriority.CRITICAL, AmbulanceType.ICU, 12.9900, 77.6100, "General Hospital");
-
-        dispatchService.submitEmergencyRequest(lowPriorityReq);
-        dispatchService.submitEmergencyRequest(highPriorityReq);
-
-        // Verify that the critical ambulance request gets actioned via logs
-        assertTrue(dispatchService.getHistoryLog().stream().anyMatch(log -> log.contains("Dispatched Ambulance AMB01 to Request REQ02")));
+    public void submitEmergencyRequest(EmergencyRequest request) {
+        if (request == null || request.getPatientId() == null || request.getPatientId().isEmpty()) {
+            throw new InvalidRequestException("Invalid emergency request data provided.");
+        }
+        
+        waitingQueue.add(request);
+        historyLog.add("Request added to queue: ID " + request.getRequestId() + " (Priority: " + request.getPriority() + ")");
+        processQueue();
     }
 
-    @Test
-    public void testInvalidRequestException() {
-        assertThrows(InvalidRequestException.class, () -> {
-            dispatchService.submitEmergencyRequest(new EmergencyRequest("REQ03", "", EmergencyPriority.HIGH, AmbulanceType.BASIC, 0, 0, ""));
-        });
+    public synchronized void processQueue() {
+        while (!waitingQueue.isEmpty()) {
+            EmergencyRequest currentRequest = waitingQueue.peek();
+            Ambulance bestMatch = findBestAmbulance(currentRequest);
+
+            if (bestMatch != null) {
+                waitingQueue.poll();
+                dispatchAmbulance(bestMatch, currentRequest);
+            } else {
+                break; // No suitable available ambulance right now, keep rest in queue
+            }
+        }
     }
+
+    private Ambulance findBestAmbulance(EmergencyRequest request) {
+        Ambulance bestAmbulance = null;
+        double minDistance = Double.MAX_VALUE;
+
+        for (Ambulance amb : ambulances) {
+            if (amb.getState() == AmbulanceState.AVAILABLE && amb.getType() == request.getRequiredType()) {
+                double distance = calculateDistance(amb.getLatitude(), amb.getLongitude(), request.getPickupLat(), request.getPickupLon());
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    bestAmbulance = amb;
+                }
+            }
+        }
+        return bestAmbulance;
+    }
+
+    public void updateAmbulanceState(String ambulanceId, AmbulanceState newState) {
+        Ambulance ambulance = ambulances.stream()
+                .filter(a -> a.getId().equals(ambulanceId))
+                .findFirst()
+                .orElseThrow(() -> new ResourceUnavailableException("Ambulance not found."));
+
+        ambulance.setState(newState);
+        historyLog.add("Ambulance " + ambulanceId + " updated state to: " + newState);
+
+        if (newState == AmbulanceState.AVAILABLE) {
+            processQueue(); // Automatically allocate to waiting requests
+        }
+    }
+
+    private void dispatchAmbulance(Ambulance ambulance, EmergencyRequest request) {
+        ambulance.setState(AmbulanceState.DISPATCHED);
+        double distance = calculateDistance(ambulance.getLatitude(), ambulance.getLongitude(), request.getPickupLat(), request.getPickupLon());
+        double etaMinutes = (distance / 50.0) * 60.0; // Assuming avg speed 50 km/h
+
+        historyLog.add(String.format("Dispatched Ambulance %s to Request %s. Est. Distance: %.2f km, ETA: %.1f mins", 
+                ambulance.getId(), request.getRequestId(), distance, etaMinutes));
+    }
+
+    private double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+        return Math.sqrt(Math.pow(lat1 - lat2, 2) + Math.pow(lon1 - lon2, 2)) * 111.0; // Simple approximation to km
+    }
+
+    public List<String> getHistoryLog() { return new ArrayList<>(historyLog); }
+    public int getWaitingQueueSize() { return waitingQueue.size(); }
 }
